@@ -1,11 +1,12 @@
 # Auto-updates data/ + manifest.json with newly published F1 sessions.
-# Lives at .github/workflows/f1-data.yml — runs on a 2h cron + manual dispatch.
+# Copy this file to .github/workflows/f1-data.yml in your hub repository.
 name: F1 data updater
 
 on:
   schedule:
-    # every 2 hours — a finished session appears ~1-3h after it ends
-    - cron: "23 */2 * * *"
+    # every 30 min — a finished session lands on the site shortly after
+    # FastF1 publishes it (runs are cheap no-ops when nothing is new)
+    - cron: "7,37 * * * *"
   workflow_dispatch:
     inputs:
       year:
