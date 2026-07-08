@@ -283,10 +283,37 @@ async function decodeBundle() {
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return gunzipJSON(bytes);
 }
-async function fetchSession(url) {
-  const r = await fetch(url, { cache: "no-cache" });
-  if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
-  return gunzipJSON(new Uint8Array(await r.arrayBuffer()));
+/* streamed fetch with progress callback, a stall watchdog and one retry —
+   a phone on bad signal must never hang forever on the loading screen */
+async function fetchSession(url, onBytes) {
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let got = 0;
+    const chunks = [];
+    const ctrl = new AbortController();
+    let lastData = Date.now();
+    const watchdog = setInterval(() => { if (Date.now() - lastData > 30000) ctrl.abort(); }, 5000);
+    try {
+      const r = await fetch(url, { signal: ctrl.signal });
+      if (!r.ok) throw new Error(url.split("/").at(-1) + ": HTTP " + r.status);
+      const reader = r.body.getReader();
+      for (; ;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value); got += value.length; lastData = Date.now();
+        if (onBytes) onBytes(value.length);
+      }
+      const buf = new Uint8Array(got);
+      let o = 0; for (const c of chunks) { buf.set(c, o); o += c.length; }
+      return await gunzipJSON(buf);
+    } catch (e) {
+      lastErr = e && e.name === "AbortError" ? new Error("connection stalled — check your signal and retry") : e;
+      if (onBytes && got) onBytes(-got);   // roll the progress counter back before retrying
+    } finally {
+      clearInterval(watchdog);
+    }
+  }
+  throw lastErr;
 }
 
 /* ---- formatting ---- */
@@ -2306,11 +2333,21 @@ HUB.render = function render() {
 };
 
 function showLoading(msg) {
+  const canEscape = MODE === "site" && HUB.manifest;
   document.getElementById("app").innerHTML =
-    `<div id="loading"><div style="font-size:15px;font-weight:700;letter-spacing:.12em;text-transform:uppercase">Mini<span style="color:var(--accent)">sector</span></div><div class="bar"><i></i></div><div style="font-size:12px" id="loadmsg">${esc(msg)}</div></div>`;
+    `<div id="loading"><div style="font-size:15px;font-weight:700;letter-spacing:.12em;text-transform:uppercase">Mini<span style="color:var(--accent)">sector</span></div><div class="bar"><i></i></div><div style="font-size:12px" id="loadmsg">${esc(msg)}</div>${canEscape ? '<button class="btn" id="cancelLoad">← all weekends</button>' : ""}</div>`;
+  const c = document.getElementById("cancelLoad");
+  if (c) c.addEventListener("click", showPicker);
 }
 function showError(msg) {
-  document.getElementById("app").innerHTML = `<div id="loading"><div class="empty"><b>Could not load data.</b><br>${esc(msg)}</div></div>`;
+  const canEscape = MODE === "site" && HUB.manifest;
+  document.getElementById("app").innerHTML =
+    `<div id="loading"><div class="empty"><b>Could not load data.</b><br>${esc(msg)}<br><br>
+    ${HUB._last ? '<button class="btn pri" id="retryBtn">Retry</button> ' : ""}${canEscape ? '<button class="btn" id="backBtn">All weekends</button>' : ""}</div></div>`;
+  const r = document.getElementById("retryBtn");
+  if (r) r.addEventListener("click", () => selectWeekend(HUB._last.y, HUB._last.r));
+  const b = document.getElementById("backBtn");
+  if (b) b.addEventListener("click", showPicker);
 }
 
 function buildShell() {
@@ -2397,10 +2434,18 @@ function initState() {
 async function selectWeekend(year, round) {
   const entry = (HUB.manifest.years[String(year)] || []).find(e => e.round === round);
   if (!entry) return;
+  HUB._last = { y: year, r: round };
   showLoading(`fetching ${entry.event} ${year}…`);
   try {
     const sids = Object.keys(entry.sessions);
-    const loaded = await Promise.all(sids.map(sid => fetchSession(entry.sessions[sid].file)));
+    const total = sids.reduce((a, sid) => a + (entry.sessions[sid].size || 0), 0);
+    let got = 0;
+    const onBytes = n => {
+      got = Math.max(0, got + n);
+      const el = document.getElementById("loadmsg");
+      if (el && total) el.textContent = `fetching ${entry.event} ${year} — ${(got / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB`;
+    };
+    const loaded = await Promise.all(sids.map(sid => fetchSession(entry.sessions[sid].file, onBytes)));
     HUB.data = {
       year: +year, round: entry.round, event: entry.event, location: entry.location,
       country: entry.country, format: entry.format, sessions: loaded,
