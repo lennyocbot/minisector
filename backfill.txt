@@ -1,6 +1,6 @@
 # One season per line, newest first — the cron works through this queue
 # automatically (2 weekends per run). Editing this file also starts a run.
-# chain-start: 1
+# chain-start: 2
 2026
 2025
 2024
